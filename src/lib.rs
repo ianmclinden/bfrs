@@ -2,15 +2,13 @@
 
 use std::{
     fmt::Display,
+    fs::File,
     io::{ErrorKind, Read, Write},
     thread,
     time::Duration,
 };
 
 use clap::{crate_name, crate_version};
-
-const TAPE_SIZE: usize = 30_000;
-const QUIT_SYMBOLS: &[&str] = &["q", "quit"];
 
 pub type Result<T> = std::result::Result<T, BFMachineError>;
 
@@ -20,6 +18,7 @@ pub enum BFMachineError {
     UnmatchedBracket,
     OutOfBounds,
     ReadError,
+    FileError(String),
     WriteError,
     Quit,
     Unknown,
@@ -31,6 +30,7 @@ impl std::fmt::Display for BFMachineError {
             BFMachineError::InvalidCommand(c) => write!(f, "Invalid command: '{}'", *c as char),
             BFMachineError::UnmatchedBracket => write!(f, "Unmatched brackets"),
             BFMachineError::OutOfBounds => write!(f, "Out of bounds"),
+            BFMachineError::FileError(n) => write!(f, "Could not read file '{}'", n),
             BFMachineError::ReadError => write!(f, "Read error"),
             BFMachineError::WriteError => write!(f, "Write error"),
             BFMachineError::Quit => write!(f, "Quitting"),
@@ -128,7 +128,7 @@ pub struct BfMachine {
 
 impl Default for BfMachine {
     fn default() -> Self {
-        Self::new(TAPE_SIZE)
+        Self::new(Self::TAPE_SIZE)
     }
 }
 
@@ -139,6 +139,10 @@ impl Drop for BfMachine {
 }
 
 impl BfMachine {
+    const TAPE_SIZE: usize = 30_000;
+    const QUIT_SYMBOLS: &'static [&'static str] = &["quit", "q"];
+    const HELP_SYMBOLS: &'static [&'static str] = &["help", "h"];
+
     pub fn new(tape_size: usize) -> Self {
         Self {
             data: vec![0; tape_size],
@@ -412,11 +416,55 @@ impl BfMachine {
         self.run(&mut std::io::stdin(), &mut std::io::stdout(), program)
     }
 
+    fn print_interactive_help() {
+        let col1 = "\x1b[16G";
+        println!("{} {}", crate_name!(), crate_version!());
+        println!("\x1b[4;1mCommands:\x1b[0m");
+        println!("  load [FILE]{col1}Load a brainfuck program from FILE");
+        println!(
+            "  {}{col1}Print this help message",
+            Self::HELP_SYMBOLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+        println!(
+            "  {}{col1}Exit the interactive terminal",
+            Self::QUIT_SYMBOLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+    }
+
+    fn try_load_file(filename: &str) -> Result<String> {
+        if filename.is_empty() {
+            return Err(BFMachineError::FileError(filename.to_string()));
+        }
+        let mut prog_file =
+            File::open(filename).map_err(|_| BFMachineError::FileError(filename.to_string()))?;
+        let mut program = String::new();
+        prog_file
+            .read_to_string(&mut program)
+            .map_err(|_| BFMachineError::FileError(filename.to_string()))?;
+        Ok(program)
+    }
+
     pub fn interactive(&mut self) -> Result<()> {
         println!("{} {}", crate_name!(), crate_version!());
         println!(
+            "Type {} for help",
+            Self::HELP_SYMBOLS
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+        println!(
             "Ctrl+C, or type {} to quit.",
-            QUIT_SYMBOLS
+            Self::QUIT_SYMBOLS
                 .iter()
                 .map(|s| format!("'{s}'"))
                 .collect::<Vec<String>>()
@@ -442,11 +490,28 @@ impl BfMachine {
                 .map_err(|_| BFMachineError::ReadError)?;
             let program = program.trim();
 
-            if QUIT_SYMBOLS.contains(&program) {
+            if Self::QUIT_SYMBOLS.contains(&program) {
                 return Ok(());
             }
 
-            if let Err(e) = self.execute(program) {
+            if Self::HELP_SYMBOLS.contains(&program) {
+                Self::print_interactive_help();
+                continue;
+            }
+
+            let args = program.split_whitespace().collect::<Vec<&str>>();
+            let mut program = program.to_string();
+            if args.first().is_some_and(|a| a == &"load") {
+                match Self::try_load_file(args.get(1).unwrap_or(&"")) {
+                    Ok(prog) => program = prog,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        continue;
+                    }
+                }
+            }
+
+            if let Err(e) = self.execute(&program) {
                 eprintln!("Error: {e}");
             }
         }
